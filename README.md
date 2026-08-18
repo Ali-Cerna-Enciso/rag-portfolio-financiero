@@ -8,7 +8,7 @@ Empaquetado en un **único binario ejecutable (`rag_core` de ~8.2 MB)** con cero
 
 ## 🔄 Migración: de Python (v1) a Rust (v2)
 
-Este motor no nació en Rust. La primera versión fue un prototipo en **Python** (LangChain + ChromaDB + sentence-transformers `multilingual-e5-large` + FastAPI), disponible como referencia histórica en la rama `v1-python` del repositorio. La migración a Rust nativo respondió a tres problemas medidos en ese prototipo:
+Este motor no nació en Rust. La primera versión fue un prototipo en **Python** (LangChain + ChromaDB + sentence-transformers `multilingual-e5-large` + FastAPI), que queda como referencia histórica en los commits anteriores del repositorio. La migración a Rust nativo respondió a tres problemas medidos en ese prototipo:
 
 | Dimensión | v1 (Python) | v2 (Rust) |
 |---|---|---|
@@ -19,7 +19,7 @@ Este motor no nació en Rust. La primera versión fue un prototipo en **Python**
 
 El resultado: el pipeline completo — ingest, retrieval, generación y validación numérica — corre en una sola máquina sin GPU, sin servicios externos de embeddings y con una superficie de dependencias mínima. La precisión de las cifras dejó de depender de un modelo de embeddings: el guardrail verifica contra el corpus con lógica determinista.
 
-> El código del prototipo v1 sigue disponible en la rama `v1-python` (referencia histórica); este repositorio (`main`) contiene únicamente el motor Rust.
+> El código del prototipo v1 queda como referencia histórica en los commits anteriores del repositorio; este historial actual (`main`) contiene únicamente el motor Rust.
 
 ---
 
