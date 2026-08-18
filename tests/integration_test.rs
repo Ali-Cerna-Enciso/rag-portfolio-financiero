@@ -529,8 +529,10 @@ fn test_multi_query_p5_real_corpus_diagnostic() {
     assert!(!results.is_empty());
 
     // Diagnóstico Microsoft: el documento existe (958 children) pero no rankea.
-    let ms_q = "cuales son las proyecciones futuras de microsoft ?";
+    let ms_q = "Que menciona microsoft sobre su inversion futura ?";
     println!("=== DIAGNOSTICO MICROSOFT: {ms_q}");
+    let expanded = expand_financial_queries(ms_q);
+    println!("   variantes: {expanded:?}");
     let ms_res = retriever.retrieve_parents(ms_q, None, 4, None);
     for (i, r) in ms_res.iter().enumerate() {
         let head: String = r.parent.content.chars().take(90).collect();

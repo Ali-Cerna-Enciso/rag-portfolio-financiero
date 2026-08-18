@@ -731,7 +731,10 @@ impl HybridRetriever {
         // la consulta global. RRF agrupa los rankings: cada tema del query
         // compuesto queda representado en el top-k.
         let issuers = detect_issuers_in_query(question);
-        let use_multi = issuer_filter.is_none() && issuers.len() >= 2;
+        // Multi-query por entidad: con 1 o más emisores detectados (y sin filtro
+        // externo), la sub-consulta se filtra al emisor. Sin esto, "inversion
+        // futura" de Ferreycorp pisa a "microsoft" (término con tf bajo por chunk).
+        let use_multi = issuer_filter.is_none() && !issuers.is_empty();
         let sub_queries: Vec<(String, Option<String>)> = if use_multi {
             // Solo sub-consultas por emisor: cada tema tiene su segmento y su
             // filtro. La consulta global diluye el ranking (pág. 100 de Ferreycorp
