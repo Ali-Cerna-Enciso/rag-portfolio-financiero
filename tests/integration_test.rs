@@ -8,8 +8,8 @@ use rag_core::ingest::{
 };
 use rag_core::llm::{strip_think_blocks, LlmClient, LlmConfig};
 use rag_core::retriever::{
-    detect_issuers_in_query, segment_query_by_issuer, EmbeddingClient, EmbeddingSearcher,
-    HybridRetriever,
+    detect_issuers_in_query, segment_query_by_issuer, tokenize_text, EmbeddingClient,
+    EmbeddingSearcher, HybridRetriever,
 };
 
 #[test]
@@ -527,6 +527,82 @@ fn test_multi_query_p5_real_corpus_diagnostic() {
         println!("  top{} [{:.4}] {}", i + 1, r.score, head.replace('\n', " "));
     }
     assert!(!results.is_empty());
+
+    // Diagnóstico Microsoft: el documento existe (958 children) pero no rankea.
+    let ms_q = "cuales son las proyecciones futuras de microsoft ?";
+    println!("=== DIAGNOSTICO MICROSOFT: {ms_q}");
+    let ms_res = retriever.retrieve_parents(ms_q, None, 4, None);
+    for (i, r) in ms_res.iter().enumerate() {
+        let head: String = r.parent.content.chars().take(90).collect();
+        println!("  top{} [{:.4}] {}", i + 1, r.score, head.replace('\n', " "));
+    }
+    println!("--- bm25 por término individual");
+    for term in ["microsoft", "forward", "outlook", "futuro", "futuras", "estrategia"] {
+        if let Ok(bm) = retriever.tantivy.search(term, None, 2) {
+            let line: Vec<String> = bm
+                .iter()
+                .map(|(id, _, sc)| {
+                    retriever
+                        .corpus
+                        .children
+                        .iter()
+                        .find(|c| &c.id == id)
+                        .map(|c| format!("{}:{} ({:.2})", c.issuer, c.page, sc))
+                        .unwrap_or_default()
+                })
+                .collect();
+            println!("   '{term}' -> {}", line.join(" | "));
+        }
+    }
+    let ms_count = retriever
+        .corpus
+        .children
+        .iter()
+        .filter(|c| c.issuer == "Microsoft")
+        .count();
+    println!("   children Microsoft en corpus: {ms_count}");
+    let ms_tokens = retriever
+        .corpus
+        .children
+        .iter()
+        .filter(|c| c.issuer == "Microsoft")
+        .flat_map(|c| tokenize_text(&c.content))
+        .filter(|t| t == "microsoft")
+        .count();
+    println!("   tokens 'microsoft' en content de MS: {ms_tokens}");
+    let fer_tokens = retriever
+        .corpus
+        .children
+        .iter()
+        .filter(|c| c.issuer == "Ferreycorp")
+        .flat_map(|c| tokenize_text(&c.content))
+        .filter(|t| t == "microsoft")
+        .count();
+    println!("   tokens 'microsoft' en content de Ferreycorp: {fer_tokens}");
+    println!("--- bm25 directo (sin filtro)");
+    if let Ok(bm) = retriever.tantivy.search(ms_q, None, 3) {
+        for (i, (id, _, sc)) in bm.iter().enumerate() {
+            let doc = retriever
+                .corpus
+                .children
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| format!("{} pág {}", c.issuer, c.page))
+                .unwrap_or_default();
+            println!("   bm25[{i}] {sc:.3} {doc}");
+        }
+    }
+    let vec = retriever.vector_searcher.search(ms_q, None, 3);
+    for (i, (id, _, sc)) in vec.iter().enumerate() {
+        let doc = retriever
+            .corpus
+            .children
+            .iter()
+            .find(|c| &c.id == id)
+            .map(|c| format!("{} pág {}", c.issuer, c.page))
+            .unwrap_or_default();
+        println!("   vec[{i}] {sc:.3} {doc}");
+    }
 
     // Desglose: ranking de cada sub-consulta (BM25 y TF-IDF por separado).
     let issuers = detect_issuers_in_query(question);

@@ -124,6 +124,14 @@ pub const CROSS_LINGUAL_EXPANSIONS: &[(&str, &str)] = &[
     ("inversión", "investment"),
     ("inversion", "investment"),
     ("banco mundial", "World Bank Macro Poverty Outlook"),
+    ("proyecciones", "forward-looking future outlook projections"),
+    ("proyeccion", "forward-looking future outlook projection"),
+    ("proyecta", "projects"),
+    ("proyecto", "project"),
+    ("futuras", "future"),
+    ("futura", "future"),
+    ("futuro", "future"),
+    ("perspectivas", "outlook forward-looking"),
 ];
 
 pub fn get_indicator_synonyms(canon_name: &str) -> Vec<String> {
