@@ -15,6 +15,7 @@ data/embeddings.bin
 
 # Launcher específico de la máquina local (contiene la ruta del usuario)
 run_cargo.bat
+lanzar_rag.bat
 
 # Python
 __pycache__/
