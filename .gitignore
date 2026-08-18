@@ -1,0 +1,81 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Rust / Cargo
+target/
+**/*.rs.bk
+data/tantivy_index/
+data/corpus.bin
+data/corpus.json
+
+# Vectores de embeddings precomputados (regenerables con tools/embeddings/compute_embeddings.py)
+data/embeddings.bin
+
+# Launcher específico de la máquina local (contiene la ruta del usuario)
+run_cargo.bat
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Base vectorial local (se regenera con el pipeline)
+chroma_db/
+parent_docs/
+
+# Manifest de ingesta incremental (hashes locales)
+data/.ingest_manifest.json
+
+# Metadatos auxiliares de conversión PDF→MD (el .md sí se versiona opcionalmente)
+data/markdown/*.meta.json
+
+# Node (tools/pdf-inspector)
+tools/node_modules/
+
+# Logs de depuración de ingesta
+ingest_log*.txt
+ingest_run.log
+qa_local_test*.log
+ingest_hybrid_reindex.log
+lfm_quality_run.log
+lfm_quality_results.json
+step_test.txt
+qa_test.txt
+mq_test.txt
+
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Variables de entorno (nunca versionar credenciales ni config local)
+.env
+.env.*
+
+# Logs y temporales
+*.log
+*.tmp
+.cache/
+logs/
+
+# Pruebas y diagnósticos temporales
+opencode_test/
+# Notas personales fuera del alcance del repositorio
+Proyecto_finanzas
+
+# PDFs institucionales locales (no se versionan)
+/FICHA_TECNICA_2026.pdf
+/Manual del Encuestador DOC.ENAPRES.08.01C_2026.pdf
+data/pdfs/FICHA_TECNICA_2026.pdf
+# Base de ENAPRES (dato institucional, fuera del repo público)
+data/markdown/FICHA_TECNICA_2026.md
+
+# Informes de trabajo internos (leer y borrar localmente)
+PROPUESTA_A_RESULTADOS.md
+PROPUESTA_C_RESULTADOS.md

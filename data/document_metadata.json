@@ -1,0 +1,32 @@
+{
+  "Ferreycorp_Memoria_Anual_2025.pdf": {
+    "issuer": "Ferreycorp",
+    "doc_type": "memoria_anual",
+    "year": 2025,
+    "title": "Memoria Anual Ferreycorp 2025"
+  },
+  "WorldBank_Macro_Poverty_Outlook_Peru_2024.pdf": {
+    "issuer": "Banco Mundial",
+    "doc_type": "reporte_macro",
+    "year": 2024,
+    "title": "Macro Poverty Outlook Perú 2024"
+  },
+  "Memoria-Anual-2025-Financiera-Efectiva.pdf": {
+    "issuer": "Financiera Efectiva",
+    "doc_type": "memoria_anual",
+    "year": 2025,
+    "title": "Memoria Anual Financiera Efectiva 2025"
+  },
+  "FICHA_TECNICA_2026.pdf": {
+    "issuer": "INEI",
+    "doc_type": "ficha_tecnica",
+    "year": 2026,
+    "title": "Ficha Técnica ENAPRES 2026"
+  },
+  "2025_AnnualReport.pdf": {
+    "issuer": "Microsoft",
+    "doc_type": "annual_report",
+    "year": 2025,
+    "title": "Microsoft Annual Report 2025"
+  }
+}

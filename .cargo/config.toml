@@ -1,0 +1,7 @@
+[http]
+check-revoke = false
+multiplexing = false
+
+[net]
+retry = 3
+git-fetch-with-cli = false
