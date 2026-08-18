@@ -4,7 +4,22 @@ Motor de **Retrieval-Augmented Generation (RAG) de Alta Fidelidad** desarrollado
 
 Empaquetado en un **único binario ejecutable (`rag_core` de ~8.2 MB)** con cero dependencias de Python ni entornos virtuales en tiempo de ejecución. Integra búsqueda híbrida en memoria (< 30 ms) y un **Guardrail Numérico Determinista con Autocorrección** (< 1 ms) que garantiza **0 alucinaciones de cifras validadas**.
 
-> **Nota histórica:** La versión inicial del prototipo fue desarrollada en Python (LangChain/ChromaDB), disponible como referencia en el historial del repositorio. El motor actual fue reescrito 100% en Rust nativo para máximo rendimiento y empaquetado standalone.
+---
+
+## 🔄 Migración: de Python (v1) a Rust (v2)
+
+Este motor no nació en Rust. La primera versión fue un prototipo en **Python** (LangChain + ChromaDB + sentence-transformers `multilingual-e5-large` + FastAPI), disponible como referencia histórica en la rama `v1-python` del repositorio. La migración a Rust nativo respondió a tres problemas medidos en ese prototipo:
+
+| Dimensión | v1 (Python) | v2 (Rust) |
+|---|---|---|
+| **Empaquetado** | Entorno Python + modelo de embeddings + API | **Un solo binario** (~8.2 MB), sin runtime |
+| **Retrieval** | ~150 ms (embeddings por API local) | **2-30 ms** (BM25 Tantivy + TF-IDF en memoria) |
+| **Guardrail de cifras** | Validación en Python (frágil ante alias y multiplicadores) | **Determinista en < 1 ms** (índice invertido + frases monetarias) |
+| **Dependencias** | LangChain, ChromaDB, sentence-transformers, FastAPI | `tantivy`, `lopdf`, `regex` (Rust) |
+
+El resultado: el pipeline completo — ingest, retrieval, generación y validación numérica — corre en una sola máquina sin GPU, sin servicios externos de embeddings y con una superficie de dependencias mínima. La precisión de las cifras dejó de depender de un modelo de embeddings: el guardrail verifica contra el corpus con lógica determinista.
+
+> El código del prototipo v1 sigue disponible en la rama `v1-python` (referencia histórica); este repositorio (`main`) contiene únicamente el motor Rust.
 
 ---
 
@@ -144,6 +159,18 @@ Precisión = promedio de datos correctos por respuesta (benchmark 2026-08, 12 ru
 | **`Qwen3.8-2B-Q4_K_M`** | 1.22 GB | 19.5 t/s | ~54% | ✅ sin timeouts |
 
 **Recomendado para probar:** `qwen2.5-3b-instruct-q4_k_m` — mejor balance velocidad/precisión y el modelo por defecto del motor.
+
+---
+
+## 🔭 Próximos pasos
+
+Trabajo en curso / planificado, en orden de prioridad:
+
+* **Reranker cruzado (cross-encoder)** sobre el top-k del retriever — reordena los fragmentos recuperados con un modelo de re-ranking local, sin cambiar la fusión RRF.
+* **Multi-query por indicador** — extender la segmentación por emisor (ya implementada) a indicadores ("ROA", "ventas") para preguntas compuestas por tema financiero.
+* **Activar el tercer ranker semántico (e5-large) cuando el corpus crezca** — la infraestructura ya existe (`tools/embeddings/`); hoy el corpus cerrado no lo justifica.
+* **Benchmark ampliado** — más preguntas por dominio y medición de TPS por modelo en el driver reutilizable.
+* **API HTTP del motor** — exponer `query`/`ingest` como servicio REST (hoy el CLI es la única interfaz).
 
 ---
 
