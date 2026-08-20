@@ -72,11 +72,20 @@ Proyecto_finanzas
 
 # PDFs institucionales locales (no se versionan)
 /FICHA_TECNICA_2026.pdf
-/Manual del Encuestador DOC.ENAPRES.08.01C_2026.pdf
+/Manual del Encuestador*.pdf
 data/pdfs/FICHA_TECNICA_2026.pdf
-# Base de ENAPRES (dato institucional, fuera del repo público)
+# Bases de datos institucionales (fuera del repo público)
 data/markdown/FICHA_TECNICA_2026.md
 
 # Informes de trabajo internos (leer y borrar localmente)
 PROPUESTA_A_RESULTADOS.md
 PROPUESTA_C_RESULTADOS.md
+
+# Benchmark local (no versionar hasta decisión del autor)
+BENCHMARK_MODELOS.md
+benchmark_nuevos.py
+benchmark_nuevos_resultados.json
+Mejoras.md
+
+# Pruebas temporales locales (omp_test)
+omp_test/

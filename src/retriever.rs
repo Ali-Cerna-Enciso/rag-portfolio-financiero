@@ -102,8 +102,6 @@ pub fn normalize_issuer_name(s: &str) -> String {
     let low = s.trim().to_lowercase().replace(['_', '-', ' '], "");
     if low.contains("worldbank") || low.contains("bancomundial") || low.contains("world") || low.contains("bank") {
         "worldbank".to_string()
-    } else if low.contains("inei") || low.contains("enapres") || low.contains("fichatecnica") {
-        "inei".to_string()
     } else if low.contains("financiera") || low.contains("efectiva") {
         "financieraefectiva".to_string()
     } else if low.contains("ferreycorp") || low.contains("ferreyros") {
@@ -122,7 +120,7 @@ pub fn matches_issuer_filter(doc_issuer: &str, filter: &str) -> bool {
     d.contains(&f) || f.contains(&d)
 }
 
-/// Propuesta C — segmenta el query compuesto en sub-frases, una por emisor.
+/// Segmenta el query compuesto en sub-frases, una por emisor.
 /// Devuelve (emisor canónico, sub-frase que lo menciona). Si un emisor no
 /// tiene segmento propio, se usa el query completo (fallback).
 pub fn segment_query_by_issuer(question: &str, issuers: &[String]) -> Vec<(String, String)> {
@@ -142,7 +140,6 @@ pub fn segment_query_by_issuer(question: &str, issuers: &[String]) -> Vec<(Strin
             "ferreycorp" => "ferreycorp",
             "financieraefectiva" => "financiera",
             "worldbank" => "banco mundial",
-            "inei" => "inei",
             other => other,
         };
         let mut seg = segments
@@ -173,7 +170,104 @@ pub fn segment_query_by_issuer(question: &str, issuers: &[String]) -> Vec<(Strin
     out
 }
 
-/// Propuesta C — detecta los emisores conocidos mencionados en el query.
+/// B1 — detecta parents que son tabla de contenido / índice (sin cifras útiles).
+/// En este corpus el índice es una tabla markdown (`||Contenido||`), no un `# Índice`.
+/// Reglas: (a) marcador "contenido/índice/toc" en una línea de tabla o encabezado,
+/// o (b) ≥60% de líneas son filas de tabla/encabezados; y (c) corto (<800 chars)
+/// o casi sin cifras (<10 dígitos). "contenido" en prosa de una nota financiera
+/// NO penaliza (se exige línea de tabla/encabezado).
+pub fn is_toc_parent(content: &str) -> bool {
+    let lineas: Vec<&str> = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if lineas.len() < 3 {
+        return false;
+    }
+    let marcadores = [
+        "contenido", "indice", "índice", "indices", "tabla de contenido",
+        "table of contents", "contents",
+    ];
+    let marcador = lineas.iter().any(|l| {
+        (l.starts_with('|') || l.starts_with('#'))
+            && marcadores.iter().any(|m| normalize_text(l).contains(m))
+    });
+    let filas_tabla = lineas.iter().filter(|l| l.starts_with('|') || l.starts_with('#')).count();
+    let densidad = filas_tabla as f64 / lineas.len() as f64;
+    let corto = content.chars().count() < 800;
+    let sin_cifras = content.chars().filter(|c| c.is_ascii_digit()).count() < 10;
+    // (a) marcador explícito en tabla/encabezado, o (b) densidad alta Y corto Y sin cifras.
+    marcador || (densidad >= 0.6 && corto && sin_cifras)
+}
+
+/// Empaquetado — solape pregunta ∩ oración-con-cifra: cuántas oraciones del
+/// contenido contienen UNA cifra Y un token de la pregunta. La carta ("Azure
+/// surpassed $75 billion in revenue") puntúa 1 porque su oración-con-cifra
+/// contiene "azure"; el bullet de Cloud ("Microsoft Cloud revenue... $168.9
+/// billion") puntúa 0 porque "azure" está en otra oración. General: ataca el
+/// patrón "parte vs todo" (una línea de negocio vs su agregado; una entidad vs el sistema).
+pub fn score_solape(question_tokens: &[String], content: &str) -> usize {
+    content
+        .split(['.', '\n'])
+        .filter(|o| {
+            let tiene_cifra = o.chars().any(|c| c.is_ascii_digit());
+            if !tiene_cifra {
+                return false;
+            }
+            let tokens = tokenize_text(o);
+            tokens.iter().any(|t| question_tokens.contains(t))
+        })
+        .count()
+}
+
+/// B — divide la pregunta en cláusulas (por ¿?, comas, puntos y la conjunción " y ").
+pub fn split_clausulas(question: &str) -> Vec<String> {
+    question
+        .split([',', ';', '\n', '¿', '?', '.'])
+        .flat_map(|s| s.split(" y "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A — ¿la cláusula es un preámbulo (solo nombra emisor + tipo de documento)?
+/// "En el Annual Report 2025 de Microsoft," queda casi vacía al quitar el emisor
+/// y las palabras de documento/año → preámbulo. "Según la carta del presidente de
+/// Ferreycorp," conserva "presidente" → NO es preámbulo (la carta es la sección).
+pub fn es_preambulo(clausula: &str, emisor: &str) -> bool {
+    let sin_emisor = normalize_text(clausula).replace(&normalize_text(emisor), "");
+    let tokens: Vec<String> = tokenize_text(&sin_emisor);
+    const DOC_WORDS: &[&str] = &[
+        "annual", "report", "memoria", "informe", "ficha", "outlook", "macro",
+        "poverty", "anual", "2024", "2025", "2026", "2023", "2022", "2021",
+        "en", "de", "el", "la", "los", "las", "del", "y", "que", "cual", "cuales",
+    ];
+    let significativos = tokens
+        .iter()
+        .filter(|t| !DOC_WORDS.contains(&t.as_str()))
+        .count();
+    significativos <= 1
+}
+
+/// C — anclas (nombres propios) de una cláusula: mayúscula inicial, no el primer
+/// token, no el emisor, no tokens del título/archivo del documento (Annual, Report).
+pub fn detectar_anclas(clausula: &str, emisor: &str, doc_tokens: &HashSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let emisor_norm = normalize_text(emisor);
+    for (i, tok) in clausula.split_whitespace().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        let first = tok.chars().next().unwrap_or(' ');
+        if first.is_uppercase() {
+            let t = normalize_text(tok.trim_matches(|c: char| !c.is_alphanumeric()));
+            if !t.is_empty() && t != emisor_norm && !doc_tokens.contains(&t) && seen.insert(t.clone()) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Detecta los emisores conocidos mencionados en el query.
 /// Devuelve nombres canónicos normalizados, deduplicados, en orden de aparición.
 /// Con ≥2 emisores el retriever ejecuta una sub-consulta por emisor (multi-query),
 /// garantizando que cada tema del query tenga representación en el top-k.
@@ -190,9 +284,6 @@ pub fn detect_issuers_in_query(question: &str) -> Vec<String> {
         ("world bank", "worldbank"),
         ("bancomundial", "worldbank"),
         ("worldbank", "worldbank"),
-        ("inei", "inei"),
-        ("enapres", "inei"),
-        ("ficha tecnica", "inei"),
         ("microsoft", "microsoft"),
     ] {
         if let Some(pos) = q.find(needle) {
@@ -378,15 +469,25 @@ impl TantivyIndexWrapper {
         query_str: &str,
         issuer_filter: Option<&str>,
         limit: usize,
+        must: &[String],
+        boost: &[String],
     ) -> Result<Vec<(String, String, f32)>, String> {
         let searcher = self.reader.searcher();
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_content_idx, self.f_indicator]);
 
         let tokens = tokenize_text(query_str);
-        if tokens.is_empty() {
+        if tokens.is_empty() && must.is_empty() {
             return Ok(vec![]);
         }
-        let safe_query = tokens.join(" ");
+        let mut safe_query = tokens.join(" ");
+        // MUST (C): "+azure" — Tantivy lo trata como término obligatorio.
+        for m in must {
+            safe_query.push_str(&format!(" +{}", m));
+        }
+        // Boost suave en cláusulas hermanas: "azure^1.5".
+        for b in boost {
+            safe_query.push_str(&format!(" {}^1.5", b));
+        }
 
         let query = query_parser
             .parse_query(&safe_query)
@@ -431,6 +532,12 @@ pub struct VectorSearcher {
 }
 
 impl VectorSearcher {
+    /// C1 — IDF del corpus para un token (ancla léxica). Sin diccionario:
+    /// un token raro que el usuario ya escribió ("azure") recibe más peso.
+    pub fn idf_of(&self, token: &str) -> Option<f32> {
+        self.vocabulary.get(token).map(|&i| self.idf[i])
+    }
+
     pub fn build(children: &[ChildChunk]) -> Self {
         let mut df: HashMap<String, usize> = HashMap::new();
         let num_docs = children.len().max(1);
@@ -552,7 +659,7 @@ impl VectorSearcher {
     }
 }
 
-/// Propuesta A — tercer ranker semántico: e5-large servido por un endpoint local
+/// Tercer ranker semántico: e5-large servido por un endpoint local
 /// (`embedding_server.py`). Los vectores de los children se precomputan con
 /// `compute_embeddings.py` a `data/embeddings.bin` (bincode: Vec<Vec<f32>>,
 /// alineado por índice con `corpus.children`). L2-normalizados → coseno = dot.
@@ -714,6 +821,42 @@ impl HybridRetriever {
         })
     }
 
+    /// C1 — repite los tokens de alta IDF del query (anclas léxicas que el
+    /// usuario ya escribió: "azure", "caterpillar") para darles más peso en BM25
+    /// y TF-IDF. General y sin diccionario: usa el IDF del corpus.
+    fn boost_anchor_tokens(&self, query: &str) -> String {
+        let tokens = tokenize_text(query);
+        if tokens.is_empty() {
+            return query.to_string();
+        }
+        let mut scored: Vec<(&String, f32)> = tokens
+            .iter()
+            .map(|t| (t, self.vector_searcher.idf_of(t).unwrap_or(0.0)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let anchors: HashSet<&String> = scored
+            .iter()
+            .take(3)
+            .filter(|(_, idf)| *idf > 3.0)
+            .map(|(t, _)| *t)
+            .collect();
+        if anchors.is_empty() {
+            return query.to_string();
+        }
+        let mut out = String::new();
+        for t in &tokens {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            if anchors.contains(t) {
+                out.push_str(&format!("{} {} {}", t, t, t));
+            } else {
+                out.push_str(t);
+            }
+        }
+        out
+    }
+
     pub fn retrieve_parents(
         &self,
         question: &str,
@@ -725,7 +868,7 @@ impl HybridRetriever {
         let mut all_vec_child_ranks: Vec<Vec<String>> = Vec::new();
         let mut all_emb_child_ranks: Vec<Vec<String>> = Vec::new();
 
-        // Propuesta C — multi-query por entidad: si el query menciona ≥2 emisores
+        // Multi-query por entidad: si el query menciona ≥2 emisores
         // conocidos y no hay filtro externo, se ejecuta una sub-consulta por emisor:
         // la sub-frase del query que lo menciona, filtrada a ese emisor, además de
         // la consulta global. RRF agrupa los rankings: cada tema del query
@@ -735,16 +878,75 @@ impl HybridRetriever {
         // externo), la sub-consulta se filtra al emisor. Sin esto, "inversion
         // futura" de Ferreycorp pisa a "microsoft" (término con tf bajo por chunk).
         let use_multi = issuer_filter.is_none() && !issuers.is_empty();
-        let sub_queries: Vec<(String, Option<String>)> = if use_multi {
-            // Solo sub-consultas por emisor: cada tema tiene su segmento y su
-            // filtro. La consulta global diluye el ranking (pág. 100 de Ferreycorp
-            // pisa al Banco Mundial por tokens de "ventas").
+
+        // A+B+C: doc_tokens por emisor (tokens de título/archivo, para no marcar
+        // "Annual"/"Report" como anclas), cláusulas métricas sin preámbulo, y
+        // anclas (nombres propios) por cláusula: MUST en su cláusula, boost en
+        // las hermanas del mismo emisor.
+        let empty_doc: HashSet<String> = HashSet::new();
+        let mut doc_tokens: HashMap<String, HashSet<String>> = HashMap::new();
+        for iss in &issuers {
+            let mut set: HashSet<String> = HashSet::new();
+            for p in &self.corpus.parents {
+                if p.issuer == *iss {
+                    for t in tokenize_text(&p.document) {
+                        set.insert(t);
+                    }
+                    for t in tokenize_text(&p.title) {
+                        set.insert(t);
+                    }
+                }
+            }
+            doc_tokens.insert(iss.clone(), set);
+        }
+
+        let sub_queries: Vec<(String, Option<String>, Vec<String>, Vec<String>)> = if use_multi && issuers.len() == 1 {
+            // A: con UN emisor, la sub-consulta NO es el fragmento del preámbulo
+            // ("En el Annual Report 2025 de Microsoft,") sino las cláusulas
+            // métricas ("ingresos anuales de Azure", "cantidad de modelos...").
+            let iss = &issuers[0];
+            let filtro = Some(iss.clone());
+            let clausulas = split_clausulas(question);
+            let metricas: Vec<String> = clausulas
+                .iter()
+                .filter(|c| !es_preambulo(c, iss))
+                .cloned()
+                .collect();
+            if metricas.is_empty() {
+                vec![(question.to_string(), filtro, Vec::new(), Vec::new())]
+            } else {
+                // Anclas de cada cláusula métrica (C).
+                let anclas_por_clausula: Vec<Vec<String>> = metricas
+                    .iter()
+                    .map(|c| detectar_anclas(c, iss, doc_tokens.get(iss).unwrap_or(&empty_doc)))
+                    .collect();
+                // Boost: anclas de las cláusulas hermanas del mismo emisor.
+                let todas: Vec<String> = anclas_por_clausula.iter().flatten().cloned().collect();
+                metricas
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let must = anclas_por_clausula[i].clone();
+                        let boost: Vec<String> = todas
+                            .iter()
+                            .filter(|a| !must.contains(a))
+                            .cloned()
+                            .collect();
+                        (c, filtro.clone(), must, boost)
+                    })
+                    .collect()
+            }
+        } else if use_multi {
+            // >=2 emisores: segmentación por emisor (la actual) + anclas.
             segment_query_by_issuer(question, &issuers)
                 .into_iter()
-                .map(|(canon, seg)| (seg, Some(canon)))
+                .map(|(canon, seg)| {
+                    let must = detectar_anclas(&seg, &canon, doc_tokens.get(&canon).unwrap_or(&empty_doc));
+                    (seg, Some(canon), must, Vec::new())
+                })
                 .collect()
         } else {
-            vec![(question.to_string(), issuer_filter.map(|s| s.to_string()))]
+            vec![(question.to_string(), issuer_filter.map(|s| s.to_string()), Vec::new(), Vec::new())]
         };
 
         // En modo multi, cada sub-consulta se fusiona internamente con RRF
@@ -754,22 +956,77 @@ impl HybridRetriever {
         // compite en igualdad con el mejor de Ferreycorp y el de Efectiva.
         let mut sub_fused: Vec<Vec<(String, f64)>> = Vec::new();
         let rrf_k = 60.0;
+        let child_to_parent: HashMap<String, String> = self.corpus.children.iter()
+            .map(|c| (c.id.clone(), c.parent_id.clone()))
+            .collect();
 
-        for (sub_q, filter) in &sub_queries {
+        // C (por PÁGINA): el MUST se evalúa contra la página completa — si algún
+        // child de la página tiene el ancla, TODOS sus siblings pasan el filtro
+        // (si algún child de la página tiene el ancla,
+        // todos sus siblings pasan el filtro; filtrar por child
+        // descartaría el fragmento con la cifra antes de la rehidratación).
+        let mut child_page: HashMap<String, (String, u32)> = HashMap::new();
+        let mut page_text: HashMap<(String, u32), String> = HashMap::new();
+        for c in &self.corpus.children {
+            child_page.insert(c.id.clone(), (c.document.clone(), c.page));
+            let e = page_text.entry((c.document.clone(), c.page)).or_default();
+            e.push_str(&normalize_text(&c.content));
+            e.push(' ');
+        }
+        let pasa_must_por_pagina = |id: &str, must: &[String]| -> bool {
+            must.iter().all(|m| {
+                child_page
+                    .get(id)
+                    .and_then(|k| page_text.get(k))
+                    .map(|t| t.contains(m))
+                    .unwrap_or(false)
+            })
+        };
+
+        for (sub_q, filter, must, boost) in &sub_queries {
             if use_multi {
                 let mut lists: Vec<Vec<String>> = Vec::new();
                 let variants = expand_financial_queries(sub_q);
                 for variant in &variants {
-                    if let Ok(bm25_res) = self.tantivy.search(variant, filter.as_deref(), 25) {
-                        let ids: Vec<String> = bm25_res.into_iter().map(|(id, _, _)| id).collect();
+                    let bv = self.boost_anchor_tokens(variant);
+                    // BM25 sin +must: el MUST se aplica por página post-filtro
+                    // (el +must a nivel child se comería la pág. 3 del 11,000).
+                    if let Ok(bm25_res) = self.tantivy.search(&bv, filter.as_deref(), 25, &[], boost) {
+                        let ids: Vec<String> = bm25_res
+                            .into_iter()
+                            .filter(|(id, _, _)| pasa_must_por_pagina(id, must))
+                            .map(|(id, _, _)| id)
+                            .collect();
                         if !ids.is_empty() {
                             lists.push(ids);
                         }
                     }
-                    let vec_res = self.vector_searcher.search(variant, filter.as_deref(), 25);
-                    let ids: Vec<String> = vec_res.into_iter().map(|(id, _, _)| id).collect();
+                    // C: MUST también en TF-IDF (post-filtro por PÁGINA).
+                    let vec_res = self.vector_searcher.search(&bv, filter.as_deref(), 25);
+                    let ids: Vec<String> = vec_res
+                        .into_iter()
+                        .filter(|(id, _, _)| pasa_must_por_pagina(id, must))
+                        .map(|(id, _, _)| id)
+                        .collect();
                     if !ids.is_empty() {
                         lists.push(ids);
+                    }
+                }
+                // Tercer ranker semántico también en el camino multi.
+                // El query_vec ya se computa en el caller (async) y aquí se aplica
+                // con el filtro de la sub-consulta (emisor). Conecta vocabulario
+                // sin diccionario: "ingresos de Azure" ↔ "Azure revenue".
+                if let (Some(query_vec), Some(emb_searcher)) = (query_vec, &self.embeddings) {
+                    if query_vec.len() == emb_searcher.dims() {
+                        let emb_res = emb_searcher.search(query_vec, filter.as_deref(), 25);
+                        let ids: Vec<String> = emb_res
+                            .into_iter()
+                            .filter(|(id, _, _)| pasa_must_por_pagina(id, must))
+                            .map(|(id, _, _)| id)
+                            .collect();
+                        if !ids.is_empty() {
+                            lists.push(ids);
+                        }
                     }
                 }
                 let fused = reciprocal_rank_fusion(&lists, rrf_k, 30);
@@ -782,21 +1039,22 @@ impl HybridRetriever {
             } else {
                 let variants = expand_financial_queries(sub_q);
                 for variant in &variants {
-                    if let Ok(bm25_res) = self.tantivy.search(variant, filter.as_deref(), 25) {
+                    let bv = self.boost_anchor_tokens(variant);
+                    if let Ok(bm25_res) = self.tantivy.search(&bv, filter.as_deref(), 25, &[], &[]) {
                         let ids: Vec<String> = bm25_res.into_iter().map(|(id, _, _)| id).collect();
                         if !ids.is_empty() {
                             all_bm25_child_ranks.push(ids);
                         }
                     }
 
-                    let vec_res = self.vector_searcher.search(variant, filter.as_deref(), 25);
+                    let vec_res = self.vector_searcher.search(&bv, filter.as_deref(), 25);
                     let ids: Vec<String> = vec_res.into_iter().map(|(id, _, _)| id).collect();
                     if !ids.is_empty() {
                         all_vec_child_ranks.push(ids);
                     }
                 }
 
-                // Propuesta A: tercer ranker semántico (mismo query_vec, filtro distinto).
+                // Tercer ranker semántico (mismo query_vec, filtro distinto).
                 if let (Some(query_vec), Some(emb_searcher)) = (query_vec, &self.embeddings) {
                     if query_vec.len() == emb_searcher.dims() {
                         let emb_res = emb_searcher.search(query_vec, filter.as_deref(), 25);
@@ -831,43 +1089,211 @@ impl HybridRetriever {
         let mut parent_scores: HashMap<String, f64> = HashMap::new();
         let mut parent_matched_children: HashMap<String, Vec<String>> = HashMap::new();
 
-        let child_to_parent: HashMap<String, String> = self.corpus.children.iter()
-            .map(|c| (c.id.clone(), c.parent_id.clone()))
-            .collect();
-
+        // B1: penalizar parents TOC/índice (pág. 3 "Contenido" sin cifras útiles).
+        let mut toc_cache: HashMap<String, bool> = HashMap::new();
         for (child_id, score) in fused_children {
             if let Some(parent_id) = child_to_parent.get(&child_id) {
+                let mut s = score;
+                let is_toc = *toc_cache.entry(parent_id.clone()).or_insert_with(|| {
+                    self.corpus
+                        .parents
+                        .iter()
+                        .find(|p| &p.id == parent_id)
+                        .map(|p| is_toc_parent(&p.content))
+                        .unwrap_or(false)
+                });
+                if is_toc {
+                    s *= 0.1;
+                }
                 // Máximo (no suma): evita el sesgo de longitud — un parent con
                 // muchos chunks rankeados (pág. larga con menciones repetidas de
                 // "ventas") no debe pisotear al parent cuyo mejor chunk es el que
                 // responde el total (p.ej. pág. 38 "ventas récord US$ 2,177 M").
                 let entry = parent_scores.entry(parent_id.clone()).or_insert(0.0);
-                *entry = entry.max(score);
+                *entry = entry.max(s);
                 parent_matched_children.entry(parent_id.clone()).or_default().push(child_id);
+            }
+        }
+
+        // Preferencia por cobertura numérica (general, sin diccionario): entre las
+        // páginas que pasan el MUST, las que juntan el ancla del query con evidencia
+        // de dinero/conteo (billion, millones, \d{4,}) son más probables de tener LA
+        // cifra pedida — la carta del $75B gana al párrafo genérico de Azure. Se
+        // aplica ANTES de la precedencia de siblings para que la ventana ±3 salga del
+        // top-1 correcto.
+        let parent_info: HashMap<String, (String, u32, String)> = self.corpus.parents.iter()
+            .map(|p| (p.id.clone(), (p.document.clone(), p.page, p.issuer.clone())))
+            .collect();
+        let todas_anclas: Vec<&String> = sub_queries
+            .iter()
+            .flat_map(|(_, _, m, _)| m.iter())
+            .collect();
+        let pat_dinero = regex::Regex::new(r"billion|million|millones|millon|mil\b|us\$|s/|\d{4,}").unwrap();
+        for (pid, score) in parent_scores.iter_mut() {
+            if let Some((doc, page, _)) = parent_info.get(pid) {
+                let texto = page_text.get(&(doc.clone(), *page)).map(|t| t.as_str()).unwrap_or("");
+                let tiene_ancla = todas_anclas.iter().any(|a| texto.contains(a.as_str()));
+                let tiene_dinero = pat_dinero.is_match(texto);
+                if tiene_ancla && tiene_dinero {
+                    *score *= 1.3;
+                }
             }
         }
 
         let mut sorted_parents: Vec<(String, f64)> = parent_scores.into_iter().collect();
         sorted_parents.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        sorted_parents.truncate(top_k);
+
+        // Ventana de sección SOLO sobre el mejor hit por emisor + rehidratación
+        // de página (la pág. 5 partida en 2 parents cuenta como UNA página; así la
+        // carta completa 5-8 entra sin gastar 2 slots en la misma página).
+
+        // 1) Siblings: los parents de la misma (doc, page) entran con el score del ancla.
+        let mut con_siblings: Vec<(String, f64)> = Vec::new();
+        for (pid, score) in &sorted_parents {
+            if let Some((doc, page, _)) = parent_info.get(pid) {
+                for cand in &self.corpus.parents {
+                    if cand.document == *doc
+                        && cand.page == *page
+                        && !con_siblings.iter().any(|(i, _)| i == &cand.id)
+                    {
+                        con_siblings.push((cand.id.clone(), *score));
+                    }
+                }
+            }
+        }
+        con_siblings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 2) Mejor hit por emisor (primer parent rankeado de cada emisor).
+        let mut mejor_por_emisor: Vec<(String, f64)> = Vec::new();
+        let mut visto: HashSet<String> = HashSet::new();
+        for (pid, score) in &con_siblings {
+            if let Some((_, _, iss)) = parent_info.get(pid) {
+                if visto.insert(iss.clone()) {
+                    mejor_por_emisor.push((pid.clone(), *score));
+                }
+            }
+        }
+
+        // 3) Vecinos ±3 del MEJOR hit por emisor, CAPADOS a 2 por ancla: la ventana
+        // no puede monopolizar el top_k (los vecinos del top-1 ocupaban casi todos los slots y las págs\.
+        // 3 y 5 del fused nunca competían).
+        let mut vecinos: Vec<(String, f64)> = Vec::new();
+        for (pid, score) in &mejor_por_emisor {
+            if let Some((doc, page, iss)) = parent_info.get(pid) {
+                let mut candidatos: Vec<(String, f64)> = Vec::new();
+                for delta in 1..=3i32 {
+                    for cand in &self.corpus.parents {
+                        if cand.document == *doc
+                            && cand.issuer == *iss
+                            && (cand.page as i32 - *page as i32).abs() == delta
+                            && !con_siblings.iter().any(|(i, _)| i == &cand.id)
+                            && !candidatos.iter().any(|(i, _)| i == &cand.id)
+                        {
+                            candidatos.push((cand.id.clone(), score * (1.0 - 0.1 * delta as f64)));
+                        }
+                    }
+                }
+                candidatos.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                for v in candidatos.into_iter().take(2) {
+                    vecinos.push(v);
+                }
+            }
+        }
+        vecinos.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 4) Otros rankeados del fused (no top-1 de su emisor, no vecinos) — van
+        // ANTES que los vecinos: los parents del fused MUST compiten por slot.
+        let otros: Vec<(String, f64)> = con_siblings
+            .iter()
+            .filter(|(i, _)| !mejor_por_emisor.iter().any(|(t, _)| t == i) && !vecinos.iter().any(|(v, _)| v == i))
+            .cloned()
+            .collect();
+
+        // 5) Orden final: top-1 por emisor → OTROS fused (por score) → vecinos capados.
+        let mut final_list: Vec<(String, f64)> = Vec::new();
+        final_list.extend(mejor_por_emisor);
+        final_list.extend(otros);
+        final_list.extend(vecinos);
+
+        // Rehidratación: agrupar por (documento, página) → un bloque por página.
+        let mut por_pagina: HashMap<(String, u32), (f64, Vec<String>)> = HashMap::new();
+        let mut orden_paginas: Vec<(String, u32)> = Vec::new();
+        for (pid, score) in &final_list {
+            if let Some((doc, page, _)) = parent_info.get(pid) {
+                let key = (doc.clone(), *page);
+                let entry = por_pagina.entry(key.clone()).or_insert_with(|| {
+                    orden_paginas.push(key.clone());
+                    (0.0, Vec::new())
+                });
+                entry.0 = entry.0.max(*score);
+                entry.1.push(pid.clone());
+            }
+        }
+        let mut bloques: Vec<(String, u32, f64)> = orden_paginas
+            .into_iter()
+            .map(|k| {
+                let (s, _) = por_pagina.get(&k).unwrap();
+                (k.0.clone(), k.1, *s)
+            })
+            .collect();
+        // Mantener el orden de final_list (top-1 por emisor → vecinos → otros):
+        // reordenar por score puro devolvería parents de baja relevancia por delante de los
+        // vecinos de sección (0.50-0.64) y las págs. 7-8 nunca entrarían.
+        // Presentación: ordenar los bloques por SOLAPE pregunta ∩ oración-con-cifra
+        // (la carta con "Azure... $75 billion" sube; el bullet de Cloud baja), para
+        // que el LLM lea primero la página cuyo dato coincide con lo pedido.
+        let q_tokens = tokenize_text(question);
+        bloques.sort_by(|a, b| {
+            let sa = score_solape(&q_tokens, por_pagina.get(&(a.0.clone(), a.1)).map(|(_, p)| p.join("\n")).unwrap_or_default().as_str());
+            let sb = score_solape(&q_tokens, por_pagina.get(&(b.0.clone(), b.1)).map(|(_, p)| p.join("\n")).unwrap_or_default().as_str());
+            sb.cmp(&sa).then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        bloques.truncate(top_k);
 
         let mut retrieved = Vec::new();
-        for (parent_id, score) in sorted_parents {
-            if let Some(parent_chunk) = self.parent_map.get(&parent_id) {
-                let matched_children = parent_matched_children.remove(&parent_id).unwrap_or_default();
-                let citation = format!("{}_{}_{} (pág. {})", 
-                    parent_chunk.issuer, 
-                    parent_chunk.doc_type, 
-                    parent_chunk.year, 
-                    parent_chunk.page
-                );
-                retrieved.push(RetrievedParent {
-                    parent: parent_chunk.clone(),
-                    score,
-                    matched_child_ids: matched_children,
-                    citations: vec![citation],
-                });
+        for (doc, page, score) in bloques {
+            let pids = &por_pagina[&(doc.clone(), page)].1;
+            let mut content = String::new();
+            let mut issuer = String::new();
+            let mut doc_type = String::new();
+            let mut year = String::new();
+            let mut title = String::new();
+            let mut child_ids = Vec::new();
+            let mut matched_children = Vec::new();
+            for pid in pids {
+                if let Some(pc) = self.parent_map.get(pid) {
+                    if !content.is_empty() {
+                        content.push_str("\n\n");
+                    }
+                    content.push_str(&pc.content);
+                    issuer = pc.issuer.clone();
+                    doc_type = pc.doc_type.clone();
+                    year = pc.year.clone();
+                    title = pc.title.clone();
+                    child_ids.extend(pc.child_ids.iter().cloned());
+                    if let Some(mc) = parent_matched_children.get(pid) {
+                        matched_children.extend(mc.iter().cloned());
+                    }
+                }
             }
+            let bloque_parent = ParentChunk {
+                id: format!("{}_p{}", doc, page),
+                document: doc.clone(),
+                page,
+                issuer: issuer.clone(),
+                doc_type: doc_type.clone(),
+                year: year.clone(),
+                title: title.clone(),
+                content,
+                child_ids,
+            };
+            let citation = format!("{}_{}_{} (pág. {})", issuer, doc_type, year, page);
+            retrieved.push(RetrievedParent {
+                parent: bloque_parent,
+                score,
+                matched_child_ids: matched_children,
+                citations: vec![citation],
+            });
         }
 
         retrieved
@@ -907,7 +1333,7 @@ mod tests {
 
     #[test]
     fn test_normalize_text_accents() {
-        // La causa raíz del caso P5: "dolares" (query) debe matchear "dólares" (doc).
+        // Normaliza acentos: "dolares" == "dólares".
         assert_eq!(normalize_text("DÓLARES"), "dolares");
         assert_eq!(normalize_text("dólares"), "dolares");
         assert_eq!(normalize_text("Dolares"), "dolares");
@@ -934,8 +1360,199 @@ mod tests {
     }
 
     #[test]
+    fn test_embeddings_ranker_acts_in_multi_mode() {
+        // Modo multi (2 emisores): el tercer ranker semántico DEBE ejecutarse.
+        // BM25 tiende a elegir "ventas netas" (parent B) sobre "ventas en dólares"
+        // (parent A); el query_vec apunta a A y debe elevarlo en la sub-consulta.
+        let pages = vec![
+            DocumentPage {
+                document: "Ferreycorp_2025.md".to_string(),
+                page: 1,
+                text: "las ventas en dólares de la corporación fueron US$ 2,177 millones en 2025".to_string(),
+                issuer: "Ferreycorp".to_string(),
+                doc_type: "memoria".to_string(),
+                year: "2025".to_string(),
+                title: "Memoria Ferreycorp".to_string(),
+            },
+            DocumentPage {
+                document: "Ferreycorp_2025.md".to_string(),
+                page: 2,
+                text: "las ventas netas ascendieron a S/. 7,798.3 millones en soles en 2025".to_string(),
+                issuer: "Ferreycorp".to_string(),
+                doc_type: "memoria".to_string(),
+                year: "2025".to_string(),
+                title: "Memoria Ferreycorp".to_string(),
+            },
+            DocumentPage {
+                document: "Efectiva_2025.md".to_string(),
+                page: 3,
+                text: "el patrimonio superó S/ 405 millones en 2025".to_string(),
+                issuer: "Financiera Efectiva".to_string(),
+                doc_type: "memoria".to_string(),
+                year: "2025".to_string(),
+                title: "Memoria Efectiva".to_string(),
+            },
+        ];
+        let mut all_parents = Vec::new();
+        let mut all_children = Vec::new();
+        for p in &pages {
+            let (ps, cs) = crate::ingest::process_page_into_chunks(p, 2000, 200, 400, 50);
+            all_parents.extend(ps);
+            all_children.extend(cs);
+        }
+        let vectors: Vec<Vec<f32>> = all_children
+            .iter()
+            .map(|c| {
+                if c.content.contains("dólares") || c.content.contains("dolares") {
+                    norm(&[0.95, 0.05])
+                } else if c.content.contains("netas") {
+                    norm(&[0.05, 0.95])
+                } else {
+                    norm(&[0.50, 0.50])
+                }
+            })
+            .collect();
+        let es = EmbeddingSearcher::build(&all_children, vectors).expect("searcher ok");
+        let tantivy = TantivyIndexWrapper::create_in_ram(&all_children).expect("tantivy");
+        let vector_searcher = VectorSearcher::build(&all_children);
+        let parent_map: HashMap<String, ParentChunk> = all_parents
+            .iter()
+            .map(|p| (p.id.clone(), p.clone()))
+            .collect();
+        let corpus = Corpus {
+            parents: all_parents,
+            children: all_children,
+            number_index: Default::default(),
+            file_hashes: Default::default(),
+            manifest_updated: "2026-08-19".to_string(),
+        };
+        let retriever = HybridRetriever {
+            corpus,
+            tantivy,
+            vector_searcher,
+            embeddings: Some(es),
+            parent_map,
+        };
+
+        let q = "que ventas reporto Ferreycorp en dolares 2025 y que patrimonio supero Financiera Efectiva";
+        assert_eq!(detect_issuers_in_query(q).len(), 2, "modo multi activo");
+
+        // Con query_vec: el ranker semántico corre en modo multi y eleva A.
+        let qv = norm(&[0.9, 0.1]);
+        let con_vec = retriever.retrieve_parents(q, None, 3, Some(qv.as_slice()));
+        assert!(!con_vec.is_empty());
+
+        let pos_2177 = con_vec.iter().position(|r| r.parent.content.contains("2,177"));
+        let pos_7798 = con_vec.iter().position(|r| r.parent.content.contains("7,798"));
+        assert!(
+            pos_2177.is_some() && (pos_7798.is_none() || pos_2177 < pos_7798),
+            "con embeddings en modo multi, 2177 debe rankear antes que 7798: {con_vec:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_toc_parent() {
+        // La pág. 3 real del corpus: tabla ||Contenido|| (~662 chars).
+        let toc = "||Contenido||\n|---|---|\n|1. Carta del Presidente|5|\n|2. NEGOCIO|6|\n|3. Gestión Comercial|38|";
+        assert!(is_toc_parent(toc), "tabla Contenido debe detectarse como TOC");
+        // Un encabezado de índice corto también.
+        assert!(is_toc_parent("# Índice\n\n1. Portada\n2. Resumen"));
+        // Una nota financiera con "contenido" en prosa NO debe penalizar.
+        let nota = "El contenido de los estados financieros auditados incluye el balance general y el estado de resultados. La utilidad neta alcanzó los S/ 481 millones, con un margen bruto de 23.0% y un ratio de mora de 3.3%.";
+        assert!(!is_toc_parent(nota), "prosa con cifras no es TOC");
+        // Prosa larga con tabla de cifras tampoco.
+        let tabla = "|Ventas Netas|7,798.3|100.0|\n|Total|7,798.3|100.0%|\n\nLas ventas netas en el 2025 ascendieron a S/ 7,798.3 millones.";
+        assert!(!is_toc_parent(tabla), "tabla financiera con cifras no es TOC");
+    }
+
+    #[test]
+    fn test_sibling_same_page_included() {
+        // Página partida en 2 parents (el split corta a ~2000 chars): el parent
+        // con la cifra (sibling de la misma página) debe entrar al top aunque el
+        // ranking prefiera el primer fragmento.
+        let page = DocumentPage {
+            document: "Ferreycorp_2025.md".to_string(),
+            page: 5,
+            // Texto largo para forzar 2 parents (≈3000 chars).
+            text: format!(
+                "{}US$ 2,177 millones en 2025.",
+                "La carta del presidente y el contexto macroeconómico del Perú en 2025: crecimiento de 3.3%, inversión de 1.5% del PBI, BCR en 4.25%. ".repeat(40)
+            ),
+            issuer: "Ferreycorp".to_string(),
+            doc_type: "memoria".to_string(),
+            year: "2025".to_string(),
+            title: "Memoria Ferreycorp".to_string(),
+        };
+        let (parents, children) = crate::ingest::process_page_into_chunks(&page, 2000, 200, 400, 50);
+        let pids: Vec<String> = parents.iter().map(|p| p.id.clone()).collect();
+        assert!(pids.len() >= 2, "la página larga debe partirse en ≥2 parents");
+
+        let corpus = Corpus {
+            parents,
+            children,
+            number_index: Default::default(),
+            file_hashes: Default::default(),
+            manifest_updated: "2026-08-19".to_string(),
+        };
+        let retriever = HybridRetriever::build(corpus, None, None).expect("build ok");
+        let results = retriever.retrieve_parents("ventas en dolares de la carta del presidente 2025", None, 4, None);
+        assert!(
+            results.iter().any(|r| r.parent.content.contains("2,177")),
+            "el sibling con la cifra debe entrar al top: {:?}",
+            results.iter().map(|r| &r.parent.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_clausulas_y_anclas() {
+        // A+B+C: el preámbulo "En el Annual Report 2025 de Microsoft," se descarta;
+        // quedan 2 cláusulas métricas; solo "Azure" es ancla (no Annual/Report/Microsoft).
+        let q = "En el Annual Report 2025 de Microsoft, ¿qué cifras menciona sobre los ingresos anuales de Azure y la cantidad de modelos disponibles en su plataforma?";
+        let issuers = detect_issuers_in_query(q);
+        assert_eq!(issuers, vec!["microsoft".to_string()]);
+
+        let clausulas = split_clausulas(q);
+        let metricas: Vec<String> = clausulas
+            .iter()
+            .filter(|c| !es_preambulo(c, &issuers[0]))
+            .cloned()
+            .collect();
+        assert_eq!(metricas.len(), 2, "dos cláusulas métricas: {metricas:?}");
+        assert!(metricas[0].to_lowercase().contains("azure"), "cláusula 1: {:?}", metricas[0]);
+        assert!(metricas[1].to_lowercase().contains("modelos"), "cláusula 2: {:?}", metricas[1]);
+
+        let doc_tokens: HashSet<String> = ["annual".into(), "report".into(), "2025".into()]
+            .into_iter()
+            .collect();
+        let anclas = detectar_anclas(&metricas[0], &issuers[0], &doc_tokens);
+        assert_eq!(anclas, vec!["azure".to_string()], "solo Azure es ancla: {anclas:?}");
+        let anclas2 = detectar_anclas(&metricas[1], &issuers[0], &doc_tokens);
+        assert!(anclas2.is_empty(), "la cláusula de modelos no tiene anclas: {anclas2:?}");
+
+        // "Según la carta del presidente de Ferreycorp," no es preámbulo: la carta es la sección pedida.
+        let q2 = "Según la carta del presidente de Ferreycorp, ¿a cuánto ascendieron las ventas en dólares en 2025?";
+        let c2 = split_clausulas(q2);
+        assert!(
+            c2.iter().any(|c| !es_preambulo(c, "ferreycorp")),
+            "la cláusula de la carta no debe descartarse: {c2:?}"
+        );
+    }
+
+    #[test]
+    fn test_score_solape() {
+        let q = "qué cifras menciona sobre los ingresos anuales de Azure y la cantidad de modelos disponibles en su plataforma";
+        let qt = tokenize_text(q);
+        // La carta: la oración-con-cifra contiene "azure" → solape 1.
+        let carta = "Azure surpassed $75 billion in revenue for the first time. We are proud of this milestone.";
+        assert_eq!(score_solape(&qt, carta), 1, "la oración de Azure con cifra debe puntuar");
+        // El bullet de Cloud: la cifra está en la oración de Cloud; "azure" en otra → 0.
+        let cloud = "Microsoft Cloud revenue increased 23% to $168.9 billion. Microsoft Cloud, which includes Azure and other services, grew.";
+        assert_eq!(score_solape(&qt, cloud), 0, "el agregado sin azure en su oración-con-cifra no puntúa");
+    }
+
+    #[test]
     fn test_detect_issuers_in_query() {
-        // P5 compuesto: 3 emisores.
+        // Query compuesto: 3 emisores.
         let q = "PBI del Banco Mundial, ventas de Ferreycorp y patrimonio de Financiera Efectiva";
         let found = detect_issuers_in_query(q);
         assert_eq!(found.len(), 3, "debe detectar 3 emisores: {found:?}");
@@ -976,7 +1593,7 @@ mod tests {
         assert!(results[0].parent.content.contains("32 camiones"));
     }
 
-    // Propuesta A: tercer ranker semántico.
+    // Tercer ranker semántico.
     fn chunk(id: &str, parent_id: &str, issuer: &str, content: &str) -> ChildChunk {
         ChildChunk {
             id: id.to_string(),

@@ -1,13 +1,13 @@
 //! Guardrail Numérico v3 — "tutor que corrige con evidencia".
 //!
 //! Fase 1: verificación dual (números crudos + frases monetarias + porcentajes)
-//!         con canonicalización de alias y multiplicadores (P1–P5, I2, I3).
+//!         con canonicalización de alias y multiplicadores.
 //! Fase 2: grounded correction — en cada reintento se envían el valor correcto
 //!         y la fuente (vía `InvertedNumberIndex`) en lugar de negar genérico (P6).
 //!         Corte de rebote: si el set de alucinaciones se repite idéntico,
 //!         se sale a sanitización sin quemar generaciones.
-//! Fase 3: sanitización por frase monetaria completa (P8), no por dígito.
-//! Fase 4: verificación de atribución por indicador (emisor × indicador, P7):
+//! Fase 3: sanitización por frase monetaria completa, no por dígito.
+//! Fase 4: verificación de atribución por indicador (emisor × indicador):
 //!         detecta cifras que no pertenecen al par (emisor, indicador) del
 //!         corpus y advierte cuando una cifra del corpus corresponde a un
 //!         segmento de negocio y no a los totales.
@@ -115,7 +115,7 @@ const ISSUER_ALIASES: &[(&str, &[&str])] = &[
 ];
 
 /// Calificadores que indican que la cifra pertenece a un segmento de negocio
-/// y no a los totales del emisor (caso P7 real).
+/// y no a los totales del emisor.
 const SEGMENT_QUALIFIERS: &[&str] = &[
     "gran minería",
     "gran mineria",
@@ -378,7 +378,7 @@ pub fn verify_attribution(response: &str, corpus: &Corpus) -> Vec<AttributionFin
             if !in_pair {
                 finding.is_misattribution = true;
             } else if sentence_mentions_total {
-                // Caso P7 real: la cifra existe en el corpus, pero el chunk
+                // La cifra existe en el corpus, pero el chunk
                 // donde aparece tiene calificador de segmento sin mencionar
                 // "total" → no corresponde a los totales del emisor.
                 let segment_snippet = snippets_by_value.get(&key).map_or(false, |snippets| {
@@ -403,7 +403,7 @@ pub fn verify_attribution(response: &str, corpus: &Corpus) -> Vec<AttributionFin
     findings
 }
 
-/// Sanitización por frase (P8): primero tacha frases monetarias/porcentajes
+/// Sanitización por frase: primero tacha frases monetarias/porcentajes
 /// completas, luego dígitos sueltos no protegidos.
 pub fn sanitize_hallucinations_full(
     text: &str,
@@ -523,7 +523,7 @@ pub fn find_corrections(
     for num in hallucinated_numbers {
         if context_raw.contains(num) {
             // Existe en el contexto: no es alucinación de existencia, el modelo
-            // atribuyó mal (P7). Advertir sin sugerir un valor.
+            // se atribuyó mal. Advertir sin sugerir un valor.
             corrections.push(Correction {
                 kind: CorrectionKind::EnCorpus,
                 hallucinated: num.clone(),
@@ -568,7 +568,7 @@ pub fn find_corrections(
 pub fn build_correction_prompt(corrections: &[Correction], attempt: usize, retries: usize) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
-        "\n\n🚨 [AUDITORÍA NUMÉRICA INEI - REINTENTO {}/{}]:",
+        "\n\n🚨 [AUDITORÍA NUMÉRICA - REINTENTO {}/{}]:",
         attempt, retries
     ));
     lines.push("Tu respuesta anterior incluyó cifras NO verificadas:".to_string());
@@ -646,13 +646,13 @@ pub async fn query_with_self_correction(
         let resp = client.generate(system_prompt, &current_user_prompt).await?;
         last_raw = resp.clone();
 
-        // P9: eco del prompt de corrección. Modelos pequeños a veces regurgitan
+        // Eco del prompt de corrección: modelos pequeños a veces regurgitan
         // la instrucción de reintento ("Tu respuesta anterior incluyó cifras NO
         // verificadas") en lugar de generar contenido nuevo. Ese texto no es una
         // respuesta: se corta el bucle y se entrega la última respuesta REAL del
         // modelo (sanitizada); el eco queda solo como raw_response de diagnóstico.
         const CORRECTION_MARKER: &str = "Tu respuesta anterior incluyó cifras NO verificadas";
-        if resp.contains(CORRECTION_MARKER) || resp.contains("AUDITORÍA NUMÉRICA INEI") {
+        if resp.contains(CORRECTION_MARKER) || resp.contains("AUDITORÍA NUMÉRICA") {
             last_response = if prev_response.is_empty() {
                 resp
             } else {
@@ -826,15 +826,6 @@ pub async fn query_with_self_correction(
 mod tests {
     use super::*;
 
-    fn money(currency: &str, digits: &str) -> MoneyPhrase {
-        MoneyPhrase {
-            currency: currency.to_string(),
-            base_digits: digits.to_string(),
-            value: digits.to_string(),
-            raw_text: String::new(),
-        }
-    }
-
     #[test]
     fn test_verify_valid_grounded() {
         let context = "Ferreycorp reportó ventas por 59,968 unidades y un margen de 14.8% en 2025.";
@@ -901,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn test_p5_percent_textual_equivalent() {
+    fn test_percent_textual_equivalent() {
         let context = "GDP growth is expected to be 2.7 percent in 2024.";
         let question = "¿Crecimiento del PBI en 2024?";
         let response = "El PBI creció 2.7% en 2024.";
@@ -910,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn test_p8_sanitize_by_phrase() {
+    fn test_sanitize_by_phrase() {
         let text = "El patrimonio de US$ 32 mil millones fue reportado.";
         let mut bad = HashSet::new();
         bad.insert("32".to_string());

@@ -2,7 +2,7 @@
 name = "rag_core"
 version = "0.1.0"
 edition = "2021"
-authors = ["INEI Data Intelligence"]
+authors = ["rag_core"]
 description = "High-fidelity local RAG engine for financial and statistical documents with deterministic numeric guardrails"
 
 [[bin]]

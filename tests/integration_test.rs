@@ -8,8 +8,7 @@ use rag_core::ingest::{
 };
 use rag_core::llm::{strip_think_blocks, LlmClient, LlmConfig};
 use rag_core::retriever::{
-    detect_issuers_in_query, segment_query_by_issuer, tokenize_text, EmbeddingClient,
-    EmbeddingSearcher, HybridRetriever,
+    detect_issuers_in_query, EmbeddingClient, EmbeddingSearcher, HybridRetriever,
 };
 
 #[test]
@@ -315,7 +314,7 @@ async fn test_attribution_strict_flag() {
     assert!(json.contains("\"segment_qualifier\":true"));
 }
 
-/// P9: el LLM regurgita el prompt de corrección ("Tu respuesta anterior incluyó
+/// El LLM regurgita el prompt de corrección ("Tu respuesta anterior incluyó
 /// cifras NO verificadas") en lugar de generar contenido nuevo. El guardrail no
 /// debe entregar ese eco como respuesta: corta el bucle y entrega la última
 /// respuesta REAL del modelo (sanitizada); el eco queda solo en raw_response.
@@ -332,7 +331,7 @@ async fn test_echo_prompt_not_accepted_as_response() {
     // 2) eco del prompt de corrección (fallo de generación).
     let respuestas = Arc::new(Mutex::new(VecDeque::from([
         "Las ventas de Ferreycorp fueron US$ 999 millones en 2025.".to_string(),
-        "\n\n🚨 [AUDITORÍA NUMÉRICA INEI - REINTENTO 1/3]:\nTu respuesta anterior incluyó cifras NO verificadas: 'usd|999000000' no existe en ningún documento.".to_string(),
+        "\n\n🚨 [AUDITORÍA NUMÉRICA - REINTENTO 1/3]:\nTu respuesta anterior incluyó cifras NO verificadas: 'usd|999000000' no existe en ningún documento.".to_string(),
     ])));
     let queue = respuestas.clone();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -394,7 +393,7 @@ async fn test_echo_prompt_not_accepted_as_response() {
     );
 }
 
-/// Propuesta A: EmbeddingClient contra un endpoint local (mock HTTP). El
+/// EmbeddingClient contra un endpoint local (mock HTTP). El
 /// servidor responde con un vector fijo de 4 dims.
 #[tokio::test]
 async fn test_embedding_client_http() {
@@ -426,7 +425,7 @@ async fn test_embedding_client_http() {
     assert!((v[0] - 0.5).abs() < 1e-6);
 }
 
-/// Propuesta A: tercer ranker activo. Con vectors artificiales donde el chunk
+/// Tercer ranker activo. Con vectors artificiales donde el chunk
 /// semánticamente correcto es "c_ventas", el query_vec lo lleva al top.
 #[tokio::test]
 async fn test_hybrid_retriever_third_ranker() {
@@ -510,11 +509,11 @@ async fn test_hybrid_retriever_third_ranker() {
     );
 }
 
-/// Propuesta C — diagnóstico sobre el corpus REAL (data/corpus.bin): ranking de
-/// parents para P5 con multi-query. #[ignore] porque requiere el corpus local.
+/// Diagnóstico sobre el corpus REAL (data/corpus.bin): ranking de
+/// parents con multi-query. #[ignore] porque requiere el corpus local.
 #[test]
 #[ignore = "requiere data/corpus.bin local"]
-fn test_multi_query_p5_real_corpus_diagnostic() {
+fn test_multi_query_real_corpus_diagnostic() {
     use std::path::Path;
     let corpus = Corpus::load_from_binary(Path::new("data/corpus.bin"))
         .expect("cargar corpus.bin local");
@@ -528,117 +527,37 @@ fn test_multi_query_p5_real_corpus_diagnostic() {
     }
     assert!(!results.is_empty());
 
-    // Diagnóstico Microsoft: el documento existe (958 children) pero no rankea.
-    let ms_q = "Que menciona microsoft sobre su inversion futura ?";
-    println!("=== DIAGNOSTICO MICROSOFT: {ms_q}");
-    let expanded = expand_financial_queries(ms_q);
-    println!("   variantes: {expanded:?}");
-    let ms_res = retriever.retrieve_parents(ms_q, None, 4, None);
-    for (i, r) in ms_res.iter().enumerate() {
-        let head: String = r.parent.content.chars().take(90).collect();
-        println!("  top{} [{:.4}] {}", i + 1, r.score, head.replace('\n', " "));
-    }
-    println!("--- bm25 por término individual");
-    for term in ["microsoft", "forward", "outlook", "futuro", "futuras", "estrategia"] {
-        if let Ok(bm) = retriever.tantivy.search(term, None, 2) {
-            let line: Vec<String> = bm
-                .iter()
-                .map(|(id, _, sc)| {
-                    retriever
-                        .corpus
-                        .children
-                        .iter()
-                        .find(|c| &c.id == id)
-                        .map(|c| format!("{}:{} ({:.2})", c.issuer, c.page, sc))
-                        .unwrap_or_default()
-                })
-                .collect();
-            println!("   '{term}' -> {}", line.join(" | "));
-        }
-    }
-    let ms_count = retriever
-        .corpus
-        .children
-        .iter()
-        .filter(|c| c.issuer == "Microsoft")
-        .count();
-    println!("   children Microsoft en corpus: {ms_count}");
-    let ms_tokens = retriever
-        .corpus
-        .children
-        .iter()
-        .filter(|c| c.issuer == "Microsoft")
-        .flat_map(|c| tokenize_text(&c.content))
-        .filter(|t| t == "microsoft")
-        .count();
-    println!("   tokens 'microsoft' en content de MS: {ms_tokens}");
-    let fer_tokens = retriever
-        .corpus
-        .children
-        .iter()
-        .filter(|c| c.issuer == "Ferreycorp")
-        .flat_map(|c| tokenize_text(&c.content))
-        .filter(|t| t == "microsoft")
-        .count();
-    println!("   tokens 'microsoft' en content de Ferreycorp: {fer_tokens}");
-    println!("--- bm25 directo (sin filtro)");
-    if let Ok(bm) = retriever.tantivy.search(ms_q, None, 3) {
-        for (i, (id, _, sc)) in bm.iter().enumerate() {
-            let doc = retriever
-                .corpus
-                .children
-                .iter()
-                .find(|c| &c.id == id)
-                .map(|c| format!("{} pág {}", c.issuer, c.page))
-                .unwrap_or_default();
-            println!("   bm25[{i}] {sc:.3} {doc}");
-        }
-    }
-    let vec = retriever.vector_searcher.search(ms_q, None, 3);
-    for (i, (id, _, sc)) in vec.iter().enumerate() {
-        let doc = retriever
-            .corpus
-            .children
-            .iter()
-            .find(|c| &c.id == id)
-            .map(|c| format!("{} pág {}", c.issuer, c.page))
-            .unwrap_or_default();
-        println!("   vec[{i}] {sc:.3} {doc}");
-    }
-
-    // Desglose: ranking de cada sub-consulta (BM25 y TF-IDF por separado).
-    let issuers = detect_issuers_in_query(question);
-    for (canon, seg) in segment_query_by_issuer(question, &issuers) {
-        println!("--- sub-consulta [{canon}] {seg}");
-        for variant in expand_financial_queries(&seg).iter().take(2) {
-            if let Ok(bm) = retriever.tantivy.search(variant, Some(&canon), 3) {
-                for (i, (id, _, sc)) in bm.iter().enumerate() {
-                    let doc_id = retriever
-                        .corpus
-                        .children
-                        .iter()
-                        .find(|c| &c.id == id)
-                        .map(|c| format!("pág {} {}", c.page, &c.content[..60.min(c.content.len())]))
-                        .unwrap_or_default();
-                    println!("   bm25[{i}] {sc:.3} {doc_id}");
+    // Diagnóstico: ¿la pág. 5 (75B) y la 3 (11,000) están en el top-30 de la
+    // cláusula de Azure? El mejor hit de Azure está ~pág. 20 y la ventana ±3 no
+    // salta a la carta 2-5.
+    let q4 = "qué cifras menciona sobre los ingresos anuales de Azure";
+    println!("=== DIAGNOSTICO top-30 ===");
+    let mut seen_pages: Vec<u32> = Vec::new();
+    if let Ok(bm) = retriever.tantivy.search(q4, Some("microsoft"), 30, &[], &[]) {
+        for (id, _, _) in &bm {
+            if let Some(c) = retriever.corpus.children.iter().find(|c| &c.id == id) {
+                if !seen_pages.contains(&c.page) {
+                    seen_pages.push(c.page);
                 }
             }
-            let vec = retriever.vector_searcher.search(variant, Some(&canon), 3);
-            for (i, (id, _, sc)) in vec.iter().enumerate() {
-                let doc_id = retriever
-                    .corpus
-                    .children
-                    .iter()
-                    .find(|c| &c.id == id)
-                    .map(|c| format!("pág {} {}", c.page, &c.content[..60.min(c.content.len())]))
-                    .unwrap_or_default();
-                println!("   vec[{i}] {sc:.3} {doc_id}");
+        }
+        println!("  BM25 top-30 páginas (primeras 12): {:?}", &seen_pages[..seen_pages.len().min(12)]);
+        println!("  pág 5 (75B) en top-30: {} | pág 3 (11,000) en top-30: {}", seen_pages.contains(&5), seen_pages.contains(&3));
+    }
+    let vec_res = retriever.vector_searcher.search(q4, Some("microsoft"), 30);
+    let mut vp: Vec<u32> = Vec::new();
+    for (id, _, _) in &vec_res {
+        if let Some(c) = retriever.corpus.children.iter().find(|c| &c.id == id) {
+            if !vp.contains(&c.page) {
+                vp.push(c.page);
             }
         }
     }
+    println!("  TF-IDF top-30 páginas (primeras 12): {:?}", &vp[..vp.len().min(12)]);
+    println!("  pág 5 en TF-IDF top-30: {} | pág 3: {}", vp.contains(&5), vp.contains(&3));
 }
 #[test]
-fn test_multi_query_p5_recovers_sales_page() {
+fn test_multi_query_recovers_sales_page() {
     // 4 parents: BM (PBI), Efectiva (patrimonio), Ferreycorp pág.38 (ventas US$, en dólares),
     // Ferreycorp pág.100 (ventas netas S/.). La 38 y la 100 compiten por el slot de Ferreycorp.
     let pages = vec![

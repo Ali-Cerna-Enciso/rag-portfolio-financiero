@@ -15,7 +15,7 @@ import struct
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]  # raíz del proyecto (tools/embeddings -> tools -> raíz)
 sys.path.insert(0, str(ROOT))
 
 MAX_CHARS = 2000

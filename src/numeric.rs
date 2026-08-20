@@ -1,6 +1,6 @@
 //! Extracción numérica de alta fidelidad para el Guardrail v3.
 //!
-//! Porta a Rust las correcciones P1–P5 validadas en el harness Python:
+//! Porta a Rust las correcciones de validación numérica del harness Python:
 //! - Tokenización completa (`32.2` → `322`, nunca `32` suelto).
 //! - Frases monetarias `(moneda_canónica, valor_canónico)` con alias
 //!   (`$`/`US$`/`USD` → `usd`; `S/`/`S./`/`PEN` → `pen`).

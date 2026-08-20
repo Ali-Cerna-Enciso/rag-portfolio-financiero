@@ -11,7 +11,7 @@ use rag_core::retriever::{EmbeddingClient, HybridRetriever};
 
 #[derive(Parser, Debug)]
 #[command(name = "rag_core")]
-#[command(author = "INEI Data Intelligence")]
+#[command()]
 #[command(version = "0.1.0")]
 #[command(about = "Motor RAG Local de Alta Fidelidad con Guardrail Numérico Determinista", long_about = None)]
 pub struct Cli {
@@ -30,16 +30,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub filter_issuer: Option<String>,
 
-    /// Modelo LLM a utilizar (qwen2.5-3b, qwen3.8-2b, qwen3.8-4b)
-    #[arg(short, long, default_value = "qwen2.5-3b")]
+    /// Modelo LLM a utilizar (qwen3.8-2b, qwen3.8-4b, qwen2.5-3b)
+    #[arg(short, long, default_value = "qwen3.8-2b")]
     pub model: String,
 
     /// URL base de llama-server o endpoint compatible OpenAI
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub api_base: String,
 
-    /// Número de documentos parent a recuperar (k)
-    #[arg(short = 'k', long, default_value_t = 4)]
+    /// Páginas parent a recuperar (k). Default 12: agnóstico al modelo — cubre
+    /// Número de parents a recuperar. k alto entrega más contexto al prompt;
+    /// k=8 cubre todo el contexto relevante; k menor reduce el haystack.
+    #[arg(short = 'k', long, default_value_t = 8)]
     pub top_k: usize,
 
     /// Ruta al directorio de datos (data/)
@@ -63,7 +65,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false, global = true)]
     pub strict_attribution: bool,
 
-    /// URL del servidor local de embeddings (Propuesta A, ej:
+    /// URL del servidor local de embeddings (ej:
     /// http://127.0.0.1:8081/v1/embeddings). Vacío = retrieval 2 vías.
     #[arg(long, default_value = "", global = true)]
     pub embeddings_url: String,
@@ -94,7 +96,7 @@ pub enum Commands {
 
 fn print_banner() {
     println!("{}", "=========================================================================".cyan());
-    println!("{}", "🦀 MOTOR RAG LOCAL EN RUST - INEI / FINANCIAL CORPUS 🦀".bright_green().bold());
+    println!("{}", "🦀 MOTOR RAG LOCAL EN RUST - FINANCIAL CORPUS 🦀".bright_green().bold());
     println!("{}", "• Búsqueda Híbrida (Tantivy BM25 + Vectorial RRF) en < 2 ms".white());
     println!("{}", "• Guardrail Numérico Determinista con Autocorrección en < 1 ms".white());
     println!("{}", "• Modelos Locales Soportados: Qwen 2.5 3B / Qwen 3.8 2B / Qwen 3.8 4B".white());
@@ -154,7 +156,7 @@ async fn execute_query(
 ) {
     // 1. Retrieval
     let t_retrieval = Instant::now();
-    // Propuesta A: embedding del query (HTTP local, async). Fallback silencioso.
+    // Embedding del query (HTTP local, async). Fallback silencioso.
     let query_vec = if let Some(ec) = embeddings {
         match ec.embed_query(question).await {
             Ok(v) => Some(v),
@@ -170,11 +172,36 @@ async fn execute_query(
     let retrieval_time = t_retrieval.elapsed();
 
     let mut sources: Vec<String> = Vec::new();
+    let mut parent_sources: Vec<serde_json::Value> = Vec::new();
     let mut context_blocks = Vec::new();
     for r in &retrieved_parents {
         let citation = r.citations.first().cloned().unwrap_or_else(|| r.parent.document.clone());
         sources.push(citation.clone());
-        context_blocks.push(format!("DOCUMENTO: {}\nCONTENIDO:\n{}", citation, r.parent.content));
+        // A1 (telemetría): qué parent EXACTO entra al prompt, no solo la página.
+        parent_sources.push(serde_json::json!({
+            "citation": citation,
+            "parent_id": &r.parent.id,
+            "page": r.parent.page,
+            "score": r.score,
+            "matched_child_ids": &r.matched_child_ids,
+            "content_chars": r.parent.content.chars().count(),
+        }));
+        // A3: anteponer el fragmento del mejor child (el LLM lee el principio).
+        // El child matcheado ya está dentro del content del parent; se destaca
+        // para evitar lost-in-the-haystack; mitigación, no reemplaza a los siblings.
+        let mut block = format!("DOCUMENTO: {}\nCONTENIDO:\n", citation);
+        if let Some(best_child_id) = r.matched_child_ids.first() {
+            if let Some(child) = retriever
+                .corpus
+                .children
+                .iter()
+                .find(|c| &c.id == best_child_id)
+            {
+                block.push_str(&format!("[fragmento relevante: {}]\n", child.content));
+            }
+        }
+        block.push_str(&r.parent.content);
+        context_blocks.push(block);
     }
 
     if retrieved_parents.is_empty() {
@@ -212,7 +239,7 @@ async fn execute_query(
         } else {
             println!("\n{}", "⚠️ AVISO: llama-server no responde en el puerto configurado.".yellow());
             println!("  Retrieval híbrido completado con éxito. Para respuesta con LLM local:");
-            println!("  Ejecuta: llama-server.exe -m llama_cpp/{} -c 4096 --port 8080\n", client.config.model);
+            println!("  Ejecuta: llama-server.exe -m llama_cpp/{} -c 8192 --port 8080\n", client.config.model);
         }
         return;
     }
@@ -239,6 +266,7 @@ async fn execute_query(
                     "error": err,
                     "retrieval_ms": retrieval_time.as_secs_f64() * 1000.0,
                     "sources": sources,
+                    "parent_sources": parent_sources,
                 })
             );
         } else {
@@ -254,6 +282,7 @@ async fn execute_query(
             "issuer_filter": issuer_filter,
             "retrieval_ms": retrieval_time.as_secs_f64() * 1000.0,
             "sources": sources,
+            "parent_sources": parent_sources,
             "guardrail": &guardrail_res,
         });
         println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
@@ -317,7 +346,7 @@ async fn execute_query(
     println!("  • Latencia Validación Numérica: {} µs (< 1 ms)", guardrail_res.guardrail_latency_micros);
 }
 
-async fn run_benchmarks(retriever: &HybridRetriever, _client: &LlmClient) {
+async fn run_benchmarks(retriever: &HybridRetriever, _client: &LlmClient, top_k: usize) {
     println!("\n{}", "📊 EJECUTANDO BATERÍA DE BENCHMARKS Y PRUEBAS DE ESTRÉS 📊".bright_yellow().bold());
     println!("{}", "=========================================================================".cyan());
 
@@ -334,7 +363,7 @@ async fn run_benchmarks(retriever: &HybridRetriever, _client: &LlmClient) {
     for (i, (query, issuer)) in test_queries.iter().enumerate() {
         println!("\n[Test {}/{}] Consulta: {}", i + 1, test_queries.len(), query.bright_white());
         let t0 = Instant::now();
-        let results = retriever.retrieve_parents(query, *issuer, 4, None);
+        let results = retriever.retrieve_parents(query, *issuer, top_k, None);
         let lat = t0.elapsed();
         retrieval_latencies.push(lat);
 
@@ -377,6 +406,7 @@ async fn interactive_loop(
     default_issuer: Option<String>,
     strict_attribution: bool,
     embeddings: Option<&EmbeddingClient>,
+    top_k: usize,
 ) {
     let mut current_issuer = default_issuer;
     let stdin = io::stdin();
@@ -421,11 +451,11 @@ async fn interactive_loop(
         }
 
         if query.eq_ignore_ascii_case(":bench") {
-            run_benchmarks(retriever, client).await;
+            run_benchmarks(retriever, client, top_k).await;
             continue;
         }
 
-        execute_query(retriever, client, query, current_issuer.as_deref(), 4, false, strict_attribution, embeddings).await;
+        execute_query(retriever, client, query, current_issuer.as_deref(), top_k, false, strict_attribution, embeddings).await;
     }
 }
 
@@ -448,7 +478,7 @@ async fn main() {
     println!("{}", "[INFO] Inicializando Motor de Búsqueda Híbrida Tantivy + Vectorial...".bright_blue());
     let t_init = Instant::now();
 
-    // Propuesta A: tercer ranker semántico opcional (endpoint local e5-large).
+    // Tercer ranker semántico opcional (endpoint local e5-large).
     let embeddings_bin: Option<PathBuf> = if cli.embeddings_url.is_empty() {
         None
     } else if cli.embeddings_bin.is_empty() {
@@ -476,13 +506,13 @@ async fn main() {
         api_base: cli.api_base.clone(),
         model: resolved_model.clone(),
         temperature: cli.temperature,
-        max_tokens: 1024,
-        timeout_secs: 120,
+        max_tokens: 2048,
+        timeout_secs: 240,
     };
     let client = LlmClient::new(llm_config);
 
     if cli.benchmark {
-        run_benchmarks(&retriever, &client).await;
+        run_benchmarks(&retriever, &client, cli.top_k).await;
         return;
     }
 
@@ -499,7 +529,7 @@ async fn main() {
                 return;
             }
             Commands::Benchmark => {
-                run_benchmarks(&retriever, &client).await;
+                run_benchmarks(&retriever, &client, cli.top_k).await;
                 return;
             }
         }
@@ -511,5 +541,5 @@ async fn main() {
     }
 
     // Default: Interactive loop
-    interactive_loop(&retriever, &client, cli.filter_issuer, cli.strict_attribution, embedding_client.as_ref()).await;
+    interactive_loop(&retriever, &client, cli.filter_issuer, cli.strict_attribution, embedding_client.as_ref(), cli.top_k).await;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Servidor local de embeddings (Propuesta A) — intfloat/multilingual-e5-large.
+"""Servidor local de embeddings — intfloat/multilingual-e5-large.
 
 API compatible con OpenAI-ish:
     POST /v1/embeddings
